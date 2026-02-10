@@ -20,7 +20,7 @@ export async function main(ns) {
       cur.agility >= base.agility + gain;
     if (done) return;
 
-    if (ns.singularity?.commitCrime) {
+    if (ns.singularity?.commitCrime("Mug")) {
       ns.singularity.commitCrime(crime, false);
       while (ns.singularity.isBusy()) await ns.sleep(1_000);
     } else {
