@@ -1,290 +1,279 @@
-/**
- * Master Brain Orchestrator
- * Reset-aware, non-stalling, auto-migrating controller
- * Bitburner 3.0.0 compliant
- */
-
 /** @param {NS} ns **/
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.ui.openTail();
+  const startedAt = Date.now();
 
-  initTelemetry(ns);
-  const cfg = createConfig();
-
-  updateStatus(ns, {
-    phase: "BOOT",
-    action: "Initializing",
-    detail: "Master Brain startup",
-  });
-
-  while (true) {
-    await reconcileState(ns, cfg);
-    await ensureControllerPlacement(ns, cfg);
-
-    await phaseV1(ns, cfg);
-    await phaseV2(ns, cfg);
-    await phaseV3(ns, cfg);
-    await phaseV4(ns, cfg);
-
-    await ns.sleep(cfg.pollMs);
-  }
-}
-
-/* ===================== CONFIG ===================== */
-
-function createConfig() {
-  return {
-    pollMs: 2000,
+  const cfg = {
+    pollMs: 3000,
     targets: ["n00dles", "foodnstuff", "joesguns"],
     homeReserveGb: 8,
     pservReservePct: 0.25,
-    pservGoalV1: 16,
-    pservGoalV2: 32,
-    homeGoalGbV3: 512,
-    bootstrapBatchCount: 25,
-    scriptMap: {
-      university: "university-hacking.js",
-      crime: "crime-mug.js",
-      autoroot: "autoroot.js",
+    phases: {
+      EARLY_INFRA: "EARLY_INFRA",
+      MID_INFRA: "MID_INFRA",
+      HOME_SCALING: "HOME_SCALING",
+      SINGULARITY: "SINGULARITY",
+    },
+    scripts: {
+      observer: "observer.js",
       controller: "controller.js",
-      runner: "runner.js",
-      pservBuyer: "pserv-buyer.js",
+      autoroot: "autoroot.js",
       buyTor: "buy-tor.js",
-      backdoor: "backdoor.js",
-      job: "jobs.js",
       darkwebBuyer: "darkweb-buyer.js",
-      homeBuyer: "home-upgrader.js",
-      faction: "faction-work.js",
+      darkwebDiscovery: "darkweb-discovery.js",
+      backdoor: "backdoor.js",
+      jobs: "jobs.js",
+      factions: "faction-work.js",
       sleeves: "sleeves.js",
       stocks: "stocks.js",
       stanek: "stanek.js",
       augments: "augment-manager.js",
-      darkwebDiscovery: "darkweb-discovery.js",
+      pservBuyer: "pserv-buyer.js",
+      homeUpgrader: "home-upgrade.js",
+      university: "university-hacking.js",
+      crime: "crime-mug.js",
     },
+  };
+
+  let lastPhase = "";
+  let lastTransition = "BOOT";
+
+  while (true) {
+    const world = scanWorld(ns);
+    const phase = derivePhase(cfg, world);
+
+    if (phase !== lastPhase) {
+      killManagedScripts(ns, cfg, true);
+      logTransition(ns, lastPhase, phase);
+      lastTransition = `${lastPhase || "BOOT"} -> ${phase}`;
+      lastPhase = phase;
+    }
+
+    await ensureObserver(ns, cfg);
+    await ensureController(ns, cfg, phase);
+    await runPhaseWork(ns, cfg, phase);
+
+    writeRegistry(ns, {
+      meta: {
+        ts: Date.now(),
+        uptimeMs: Date.now() - startedAt,
+      },
+      bootstrap: {
+        phase,
+        transition: lastTransition,
+        nextTransition: nextTransitionHint(phase),
+      },
+      infra: {
+        homeRam: world.homeRam,
+        homeCores: world.homeCores,
+        torOwned: world.torOwned,
+        pservs: world.pservs,
+        backdoors: world.backdoors.length,
+      },
+      controller: {
+        host: world.controllerHost,
+        mode: world.controllerHost && world.controllerHost !== "home" ? "PSERV_ONLY" : "HOME_FALLBACK",
+        targets: cfg.targets,
+      },
+      singularity: {
+        unlocked: world.singularityUnlocked,
+        factions: world.factions.length,
+        augments: world.augments.length,
+      },
+      economy: {
+        cash: ns.getServerMoneyAvailable("home"),
+      },
+    });
+
+    await maybeInstallAugments(ns, cfg, phase);
+    await ns.sleep(cfg.pollMs);
+  }
+}
+
+function scanWorld(ns) {
+  const pservs = ns.cloud.getServerNames();
+  const pservRams = pservs.map((h) => ns.getServerMaxRam(h));
+  const backdoors = scanAll(ns).filter((h) => ns.getServer(h).backdoorInstalled);
+
+  return {
+    torOwned: ns.getPlayer().tor,
+    darkwebPrograms: [
+      "BruteSSH.exe",
+      "FTPCrack.exe",
+      "relaySMTP.exe",
+      "HTTPWorm.exe",
+      "SQLInject.exe",
+      "ServerProfiler.exe",
+      "DeepscanV1.exe",
+      "DeepscanV2.exe",
+      "AutoLink.exe",
+      "Formulas.exe",
+    ].filter((f) => ns.fileExists(f, "home")),
+    homeRam: ns.getServerMaxRam("home"),
+    homeCores: ns.getServer("home").cpuCores,
+    pservs: {
+      count: pservs.length,
+      minRam: pservRams.length > 0 ? Math.min(...pservRams) : 0,
+      maxRam: pservRams.length > 0 ? Math.max(...pservRams) : 0,
+      limit: ns.cloud.getServerLimit(),
+    },
+    backdoors,
+    csecBackdoored: ns.serverExists("CSEC") ? ns.getServer("CSEC").backdoorInstalled : false,
+    factions: ns.getPlayer().factions,
+    augments: ns.singularity?.getOwnedAugmentations ? ns.singularity.getOwnedAugmentations(true) : [],
+    bitnode: ns.getResetInfo ? ns.getResetInfo().currentNode : null,
+    singularityUnlocked: Boolean(ns.singularity?.getOwnedAugmentations),
+    controllerHost: findRunningScript(ns, "controller.js"),
   };
 }
 
-/* ===================== CONTROLLER MIGRATION ===================== */
+function derivePhase(cfg, world) {
+  if (!world.singularityUnlocked) return cfg.phases.EARLY_INFRA;
+  const pservsReadyForMidExit = world.pservs.count >= world.pservs.limit && world.pservs.minRam >= 32;
+  const controllerOnPserv = Boolean(world.controllerHost) && world.controllerHost !== "home";
+  if (!pservsReadyForMidExit || !world.csecBackdoored || !controllerOnPserv) return cfg.phases.MID_INFRA;
+  if (world.homeRam < 512) return cfg.phases.HOME_SCALING;
+  return cfg.phases.SINGULARITY;
+}
 
-function getDesiredControllerHost(ns) {
+async function runPhaseWork(ns, cfg, phase) {
+  if (phase === cfg.phases.EARLY_INFRA) {
+    runIfMissing(ns, cfg.scripts.autoroot);
+    runIfMissing(ns, cfg.scripts.buyTor);
+    runIfMissing(ns, cfg.scripts.university, [15]);
+    runIfMissing(ns, cfg.scripts.crime, ["Mug someone", 10]);
+    runIfMissing(ns, cfg.scripts.pservBuyer, [16]);
+    return;
+  }
+
+  if (phase === cfg.phases.MID_INFRA) {
+    runIfMissing(ns, cfg.scripts.autoroot);
+    runIfMissing(ns, cfg.scripts.darkwebBuyer);
+    runIfMissing(ns, cfg.scripts.backdoor);
+    runIfMissing(ns, cfg.scripts.jobs);
+    runIfMissing(ns, cfg.scripts.factions);
+    runIfMissing(ns, cfg.scripts.pservBuyer, [32]);
+    return;
+  }
+
+  if (phase === cfg.phases.HOME_SCALING) {
+    runIfMissing(ns, cfg.scripts.autoroot);
+    runIfMissing(ns, cfg.scripts.darkwebBuyer);
+    runIfMissing(ns, cfg.scripts.backdoor);
+    runIfMissing(ns, cfg.scripts.jobs);
+    runIfMissing(ns, cfg.scripts.factions);
+    runIfMissing(ns, cfg.scripts.homeUpgrader);
+    return;
+  }
+
+  if (phase === cfg.phases.SINGULARITY) {
+    runIfMissing(ns, cfg.scripts.autoroot);
+    runIfMissing(ns, cfg.scripts.darkwebDiscovery);
+    runIfMissing(ns, cfg.scripts.backdoor);
+    runIfMissing(ns, cfg.scripts.jobs);
+    runIfMissing(ns, cfg.scripts.factions);
+    runIfMissing(ns, cfg.scripts.sleeves);
+    runIfMissing(ns, cfg.scripts.stocks);
+    runIfMissing(ns, cfg.scripts.stanek);
+    runIfMissing(ns, cfg.scripts.augments);
+  }
+}
+
+async function ensureObserver(ns, cfg) {
+  if (ns.isRunning(cfg.scripts.observer, "home")) return;
+  ns.exec(cfg.scripts.observer, "home", 1);
+}
+
+async function ensureController(ns, cfg, phase) {
+  const desiredHost = getDesiredControllerHost(ns, phase);
+  const script = cfg.scripts.controller;
+  const runningHost = findRunningScript(ns, script);
+
+  if (runningHost === desiredHost) return;
+  if (runningHost) ns.scriptKill(script, runningHost);
+
+  if (!ns.fileExists(script, desiredHost)) {
+    await ns.scp([script, "runner.js"], desiredHost, "home");
+  }
+
+  ns.exec(
+    script,
+    desiredHost,
+    1,
+    "--targets",
+    ...cfg.targets,
+    "--reserve-home",
+    String(cfg.homeReserveGb),
+    "--reserve-pserv-pct",
+    String(cfg.pservReservePct),
+  );
+}
+
+function getDesiredControllerHost(ns, phase) {
+  if (phase === "EARLY_INFRA") return "home";
   const pservs = ns.cloud.getServerNames();
   return pservs.length > 0 ? pservs[0] : "home";
 }
 
-async function ensureControllerPlacement(ns, cfg) {
-  const desiredHost = getDesiredControllerHost(ns);
-  const controller = cfg.scriptMap.controller;
+async function maybeInstallAugments(ns, cfg, phase) {
+  if (phase !== cfg.phases.SINGULARITY) return;
+  if (!ns.singularity?.installAugmentations || !ns.singularity?.getOwnedAugmentations) return;
 
-  const runningHost = findRunningScript(ns, controller);
-  if (runningHost === desiredHost) return;
+  const owned = ns.singularity.getOwnedAugmentations(true);
+  const pending = ns.singularity.getOwnedAugmentations(false);
+  if (owned.length === pending.length) return;
 
-  // Kill old instance if running elsewhere
-  if (runningHost) {
-    ns.scriptKill(controller, runningHost);
-  }
-
-  // Copy if needed
-  if (!ns.fileExists(controller, desiredHost)) {
-    await ns.scp(controller, desiredHost, "home");
-  }
-
-  // Start controller
-  const pid = ns.exec(
-    controller,
-    desiredHost,
-    1,
-    "--targets",
-    ...cfg.targets
-  );
-
-  if (pid) {
-    updateStatus(ns, {
-      last: `Controller migrated to ${desiredHost}`,
-    });
-  }
+  killManagedScripts(ns, cfg, false);
+  const host = findRunningScript(ns, cfg.scripts.controller);
+  if (host) ns.scriptKill(cfg.scripts.controller, host);
+  ns.singularity.installAugmentations("master-brain.js");
 }
+
+function runIfMissing(ns, script, args = []) {
+  if (!ns.fileExists(script, "home")) return;
+  if (!ns.isRunning(script, "home")) ns.exec(script, "home", 1, ...args);
+}
+
 
 function findRunningScript(ns, script) {
-  for (const h of ["home", ...ns.cloud.getServerNames()]) {
-    if (ns.isRunning(script, h)) return h;
+  for (const host of ["home", ...ns.cloud.getServerNames()]) {
+    if (ns.isRunning(script, host)) return host;
   }
-  return null;
+  return "";
 }
 
-/* ===================== RESET AWARENESS ===================== */
-
-function detectReset(ns) {
-  if (ns.getServerMoneyAvailable("home") < 1_000_000) return true;
-  if (ns.getHackingLevel() < 10) return true;
-  if (ns.cloud.getServerNames().length === 0) return true;
-  return false;
-}
-
-async function reconcileState(ns, cfg) {
-  if (!detectReset(ns)) return;
-
-  updateStatus(ns, {
-    phase: "RESET",
-    action: "Reinitializing",
-    detail: "Detected reset – clearing stale state",
-    error: "",
-  });
-
-  killKnownAutomation(ns, cfg, true);
-  await ns.sleep(2000);
-}
-
-/* ===================== TELEMETRY ===================== */
-
-const STATUS = {
-  phase: "",
-  action: "",
-  detail: "",
-  last: "",
-  error: "",
-  since: Date.now(),
-  moneySamples: [],
-};
-
-function initTelemetry(ns) {
-  STATUS.moneySamples.push({
-    t: Date.now(),
-    m: ns.getServerMoneyAvailable("home"),
-  });
-}
-
-function updateStatus(ns, patch = {}) {
-  Object.assign(STATUS, patch);
-  STATUS.since = Date.now();
-  renderStatus(ns);
-}
-
-function recordMoney(ns) {
-  STATUS.moneySamples.push({
-    t: Date.now(),
-    m: ns.getServerMoneyAvailable("home"),
-  });
-  if (STATUS.moneySamples.length > 20) STATUS.moneySamples.shift();
-}
-
-function moneyPerSecond() {
-  if (STATUS.moneySamples.length < 2) return 0;
-  const a = STATUS.moneySamples[0];
-  const b = STATUS.moneySamples.at(-1);
-  const dt = (b.t - a.t) / 1000;
-  return dt > 0 ? (b.m - a.m) / dt : 0;
-}
-
-function renderStatus(ns) {
-  ns.clearLog();
-  recordMoney(ns);
-
-  const pservs = ns.cloud.getServerNames();
-  const controllerHost = findRunningScript(ns, "controller.js");
-
-  ns.print("========= MASTER BRAIN =========");
-  ns.print(`Phase      : ${STATUS.phase}`);
-  ns.print(`Action     : ${STATUS.action}`);
-  ns.print(`Detail     : ${STATUS.detail}`);
-  if (STATUS.last) ns.print(`Last       : ${STATUS.last}`);
-  if (STATUS.error) ns.print(`ERROR      : ${STATUS.error}`);
-  ns.print("--------------------------------");
-  ns.print(`Controller : ${controllerHost ? `RUNNING (${controllerHost})` : "STOPPED"}`);
-  ns.print(`Pservs     : ${pservs.length}/${ns.cloud.getServerLimit()}`);
-  ns.print(`Home RAM   : ${ns.getServerMaxRam("home")}GB`);
-  ns.print(`Income     : ${moneyPerSecond().toFixed(0)} $/sec`);
-  ns.print(`Heartbeat  : ${Math.floor((Date.now() - STATUS.since) / 1000)}s`);
-  ns.print("================================");
-}
-
-/* ===================== PHASES ===================== */
-
-async function phaseV1(ns, cfg) {
-  if (await allPservsAtLeast(ns, cfg.pservGoalV1)) return;
-
-  updateStatus(ns, { phase: "V1", action: "Bootstrap", detail: "Early game" });
-
-  await runTimed(ns, cfg.scriptMap.university, [], 60000, "University");
-  await runTimed(ns, cfg.scriptMap.crime, ["mug"], 60000, "Crime");
-  await runIdle(ns, cfg.scriptMap.autoroot, "Autoroot");
-  await runIdle(ns, cfg.scriptMap.pservBuyer, "Pserv Buyer");
-}
-
-async function phaseV2(ns, cfg) {
-  if (await allPservsAtLeast(ns, cfg.pservGoalV2)) return;
-
-  updateStatus(ns, { phase: "V2", action: "Expansion", detail: "Scaling servers" });
-
-  await runIdle(ns, cfg.scriptMap.autoroot, "Autoroot");
-  await runIdle(ns, cfg.scriptMap.darkwebBuyer, "Darkweb");
-  await runIdle(ns, cfg.scriptMap.backdoor, "Backdoor");
-  await runIdle(ns, cfg.scriptMap.pservBuyer, "Pserv Upgrade");
-}
-
-async function phaseV3(ns, cfg) {
-  if (ns.getServerMaxRam("home") >= cfg.homeGoalGbV3) return;
-
-  updateStatus(ns, { phase: "V3", action: "Home Scaling", detail: "Upgrading home RAM" });
-
-  const upgraded = await runIdle(ns, cfg.scriptMap.homeBuyer, "Home Upgrade");
-
-  if (!upgraded) {
-    await runTimed(
-      ns,
-      cfg.scriptMap.controller,
-      ["--targets", ...cfg.targets, "--batches", 10],
-      60000,
-      "Controller funding"
-    );
-  }
-}
-
-async function phaseV4(ns, cfg) {
-  updateStatus(ns, { phase: "V4", action: "Endgame", detail: "Steady state" });
-  await runIdle(ns, cfg.scriptMap.autoroot, "Autoroot");
-  await runIdle(ns, cfg.scriptMap.darkwebDiscovery, "Darkweb Scan");
-}
-
-/* ===================== EXEC HELPERS ===================== */
-
-async function runIdle(ns, script, label) {
-  if (!ns.fileExists(script, "home")) return false;
-  const pid = ns.exec(script, "home", 1);
-  if (!pid) return false;
-  while (ns.isRunning(pid)) await ns.sleep(1000);
-  return true;
-}
-
-async function runTimed(ns, script, args, ms, label) {
-  if (!ns.fileExists(script, "home")) return false;
-  const pid = ns.exec(script, "home", 1, ...args);
-  if (!pid) return false;
-
-  const start = Date.now();
-  while (ns.isRunning(pid)) {
-    if (Date.now() - start > ms) {
-      ns.kill(pid);
-      return true;
-    }
-    await ns.sleep(1000);
-  }
-  return true;
-}
-
-/* ===================== UTILS ===================== */
-
-async function allPservsAtLeast(ns, sizeGb) {
-  const pservs = ns.cloud.getServerNames();
-  if (pservs.length < ns.cloud.getServerLimit()) return false;
-  return pservs.every(h => ns.getServerMaxRam(h) >= sizeGb);
-}
-
-function killKnownAutomation(ns, cfg, includeController) {
-  const scripts = Object.values(cfg.scriptMap);
-  if (!includeController) scripts.splice(scripts.indexOf(cfg.scriptMap.controller), 1);
-
+function killManagedScripts(ns, cfg, includeController) {
+  const scripts = Object.values(cfg.scripts).filter((s) => includeController || s !== cfg.scripts.controller);
   for (const host of ["home", ...ns.cloud.getServerNames()]) {
     for (const script of scripts) ns.scriptKill(script, host);
   }
+}
+
+function scanAll(ns) {
+  const seen = new Set(["home"]);
+  const queue = ["home"];
+  while (queue.length) {
+    const host = queue.shift();
+    for (const next of ns.scan(host)) {
+      if (seen.has(next)) continue;
+      seen.add(next);
+      queue.push(next);
+    }
+  }
+  return [...seen];
+}
+
+function nextTransitionHint(phase) {
+  if (phase === "EARLY_INFRA") return "All pservs >= 16GB";
+  if (phase === "MID_INFRA") return "All pservs >= 32GB + CSEC backdoor + controller on pserv";
+  if (phase === "HOME_SCALING") return "Home RAM >= 512GB";
+  return "Augment install readiness";
+}
+
+function logTransition(ns, from, to) {
+  ns.print(`[TRANSITION] ${from || "BOOT"} -> ${to}`);
+}
+
+function writeRegistry(ns, payload) {
+  ns.write("/data/registry.txt", JSON.stringify(payload, null, 2), "w");
 }
