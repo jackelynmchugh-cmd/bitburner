@@ -1,31 +1,34 @@
 /** @param {NS} ns **/
 export async function main(ns) {
-  const targetRam = Number(ns.args[0] ?? ns.args[1] ?? 0);
-  const limit = ns.getPurchasedServerLimit();
+  const targetRam = Number(ns.args[0] ?? 0);
+  const limit = ns.cloud.getServerLimit();
 
   while (true) {
     let acted = false;
-    const pservs = ns.getPurchasedServers();
+    const pservs = ns.cloud.getServerNames();
 
     while (pservs.length < limit) {
-      const nextRam = targetRam > 0 ? targetRam : 8;
-      const cost = ns.getPurchasedServerCost(nextRam);
+      const nextRam = Math.max(2, targetRam || 8);
+      const cost = ns.cloud.getPurchaseServerCost(nextRam);
       if (ns.getServerMoneyAvailable("home") < cost) break;
+
       const name = `pserv-${pservs.length}`;
-      if (ns.purchaseServer(name, nextRam)) {
-        pservs.push(name);
-        acted = true;
-      } else break;
+      const host = ns.cloud.purchaseServer(name, nextRam);
+      if (!host) break;
+
+      pservs.push(host);
+      acted = true;
     }
 
-    for (const host of ns.getPurchasedServers()) {
-      const cur = ns.getServerMaxRam(host);
-      const desired = targetRam > 0 ? targetRam : cur * 2;
-      if (desired <= cur) continue;
-      const cost = ns.getPurchasedServerUpgradeCost(host, desired);
-      if (Number.isFinite(cost) && ns.getServerMoneyAvailable("home") >= cost) {
-        if (ns.upgradePurchasedServer(host, desired)) acted = true;
-      }
+    for (const host of ns.cloud.getServerNames()) {
+      const curRam = ns.getServerMaxRam(host);
+      const desiredRam = targetRam > 0 ? targetRam : curRam * 2;
+      if (desiredRam <= curRam) continue;
+
+      const cost = ns.cloud.getUpgradeServerCost(host, desiredRam);
+      if (!Number.isFinite(cost) || ns.getServerMoneyAvailable("home") < cost) continue;
+
+      if (ns.cloud.upgradeServer(host, desiredRam)) acted = true;
     }
 
     if (!acted) return;
