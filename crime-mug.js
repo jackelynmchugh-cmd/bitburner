@@ -1,7 +1,8 @@
 /** @param {NS} ns **/
 export async function main(ns) {
-  ns.disableLog("sleep");
-  const crime = String(ns.args[0] ?? "Mug someone");
+  const crime = ns.enums?.CrimeType?.MUG ?? "Mug someone"; // exact
+  // ... rest same, but use exact string
+}
   const gain = Number(ns.args[1] ?? 25);
   const p = ns.getPlayer();
   const base = {
