@@ -1,5 +1,8 @@
 /** @param {NS} ns **/
 export async function main(ns) {
+  const classType = ns.enums?.UniversityClassType?.ALGORITHMS ?? "Algorithms"; // exact
+  // ... rest same
+}
   ns.disableLog("sleep");
   const gain = Number(ns.args[0] ?? 25);
   const start = ns.getHackingLevel();
