@@ -9,21 +9,33 @@ export async function main(ns) {
 
   ns.disableLog("ALL");
 
-  const START_RAM = 8; // Start purchasing at 8GB per server
-  const limit = ns.cloud.getServerLimit(); // Max servers we can own
+  // Parse target RAM from arguments
+  const targetRamArg = ns.args.find(a => a.startsWith("--targetRam="));
+  const scalingMode = ns.args.includes("--scaling");
+  
+  let targetRam = targetRamArg 
+    ? parseInt(targetRamArg.split("=")[1], 10) 
+    : 8;
+  
+  const limit = ns.cloud.getServerLimit();
 
   while (true) {
     let acted = false;
     const money = ns.getServerMoneyAvailable("home");
     let pservs = ns.cloud.getServerNames();
 
-    // --- 1) Fill empty slots with new 8GB servers ---
+    // Adjust target based on scaling mode
+    if (scalingMode && pservs.length === limit) {
+      targetRam = Math.min(targetRam * 2, 2 ** 20); // Cap at max
+    }
+
+    // --- 1) Fill empty slots with servers at target RAM ---
     while (pservs.length < limit) {
-      const cost = (ns.cloud.getPurchaseServerCost || ns.cloud.getServerCost)(START_RAM);
+      const cost = (ns.cloud.getPurchaseServerCost || ns.cloud.getServerCost)(targetRam);
       if (money < cost) break;
 
       const name = `pserv-${pservs.length}`;
-      const host = ns.cloud.purchaseServer(name, START_RAM);
+      const host = ns.cloud.purchaseServer(name, targetRam);
       if (!host) break;
 
       pservs = ns.cloud.getServerNames();
@@ -37,6 +49,7 @@ export async function main(ns) {
       const lowest = rams[0];
       const maxRam = ns.cloud.getRamLimit ? ns.cloud.getRamLimit() : 2 ** 20;
       const nextRam = Math.min(lowest.ram * 2, maxRam);
+      
       if (nextRam > lowest.ram) {
         const costNew = (ns.cloud.getPurchaseServerCost || ns.cloud.getServerCost)(nextRam);
         if (money >= costNew) {
@@ -67,7 +80,7 @@ export async function main(ns) {
 
       if (ns.cloud.upgradeServer(host, desiredRam)) {
         acted = true;
-        break; // One upgrade per tick to avoid spending all money in one go
+        break; // One upgrade per tick
       }
     }
 
@@ -85,7 +98,8 @@ export async function main(ns) {
         count: updated.length,
         minRam: minRam === Infinity ? 0 : minRam,
         maxRam: maxRamFound,
-        limit
+        limit,
+        targetRam
       }
     });
 
@@ -105,3 +119,4 @@ function getFirstFreeIndex(ns) {
     if (!used.has(i)) return i;
   }
   return undefined;
+}

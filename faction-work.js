@@ -10,11 +10,10 @@ export async function main(ns) {
   
   ns.disableLog("ALL");
 
-  // Join any pending invitations (after checking requirements)
+  // Join any pending invitations
   if (ns.singularity.checkFactionInvitations) {
     const invitations = ns.singularity.checkFactionInvitations();
     for (const faction of invitations) {
-      // Check if we meet requirements before joining
       const check = checkFactionRequirements(ns, faction);
       if (check.met) {
         ns.singularity.joinFaction(faction);
@@ -31,17 +30,15 @@ export async function main(ns) {
     return;
   }
 
-  // Prioritize factions for work
-  const prioritizedFactions = prioritizeFactionsForWork(ns, joined);
+  const prioritized = prioritizeFactionsForWork(ns, joined);
 
   while (true) {
-    // Check if we should stop (rotation timeout)
     try {
       const reg = ns.read("/data/registry.txt");
       if (reg) {
         const registry = JSON.parse(reg);
         const rotationTimeout = registry.rotation?.timeout || 0;
-        const rotationWindow = 5 * 60 * 1000; // 5 minutes
+        const rotationWindow = 5 * 60 * 1000;
         if (rotationTimeout > 0 && Date.now() - rotationTimeout >= rotationWindow) {
           return;
         }
@@ -50,48 +47,23 @@ export async function main(ns) {
     
     let worked = false;
     
-    // Work for factions in priority order
-    for (const faction of prioritizedFactions) {
+    for (const faction of prioritized) {
       if (!ns.singularity.workForFaction) break;
       
-      // Check if we still meet requirements (in case of conflicts)
       const check = checkFactionRequirements(ns, faction);
       if (!check.met) {
         ns.print(`Lost access to ${faction}: ${check.reason}`);
         continue;
       }
       
-      // Try hacking work first (best rep)
-      if (ns.singularity.workForFaction(faction, "hacking", false)) {
-        updateRegistrySection(ns, "singularity", {
-          currentFaction: faction,
-          currentWork: "hacking"
-        });
-        updateRegistrySection(ns, "economy", {
-          lastActivity: `faction-${faction}`
-        });
-        worked = true;
-        break;
-      }
+      // Determine best work type based on player stats
+      const player = ns.getPlayer();
+      const workType = selectBestWorkType(ns, faction, player);
       
-      // Fallback to field work
-      if (ns.singularity.workForFaction(faction, "field", false)) {
+      if (workType && ns.singularity.workForFaction(faction, workType, false)) {
         updateRegistrySection(ns, "singularity", {
           currentFaction: faction,
-          currentWork: "field"
-        });
-        updateRegistrySection(ns, "economy", {
-          lastActivity: `faction-${faction}`
-        });
-        worked = true;
-        break;
-      }
-      
-      // Fallback to security work
-      if (ns.singularity.workForFaction(faction, "security", false)) {
-        updateRegistrySection(ns, "singularity", {
-          currentFaction: faction,
-          currentWork: "security"
+          currentWork: workType
         });
         updateRegistrySection(ns, "economy", {
           lastActivity: `faction-${faction}`
@@ -104,10 +76,54 @@ export async function main(ns) {
     if (!worked) {
       await ns.sleep(5000);
     } else {
-      // Wait while busy
-      while (ns.singularity.isBusy && ns.singularity.isBusy()) {
+      while (ns.singularity.isBusy?.()) {
         await ns.sleep(1000);
       }
     }
   }
+}
+
+function selectBestWorkType(ns, faction, player) {
+  // Different factions benefit from different work types
+  const factionFocus = {
+    // Hacking-focused
+    "CyberSec": "hacking",
+    "Netburners": "hacking",
+    "Tian Di Hui": "hacking",
+    "NiteSec": "hacking",
+    "The Black Hand": "hacking",
+    "BitRunners": "hacking",
+    
+    // Combat-focused
+    "Slum Snakes": "field",
+    "Tetrads": "field",
+    "Silhouette": "field",
+    "Speakers for the Dead": "field",
+    "The Dark Army": "field",
+    "The Syndicate": "field",
+    
+    // Balanced
+    "Aevum": "field",
+    "Chongqing": "field",
+    "New Tokyo": "field",
+    "Ishima": "field",
+    "Sector-12": "field",
+    "Volhaven": "field"
+  };
+  
+  const focus = factionFocus[faction] || "hacking";
+  
+  // If player is heavily specialized one way, might be better to do opposite work
+  // (lower base = faster gains)
+  const hackAdvantage = player.hacking / (player.strength + 1);
+  
+  if (hackAdvantage > 5 && focus === "field") {
+    // Your field work will level faster due to lower base
+    return "field";
+  } else if (hackAdvantage < 0.5 && focus === "hacking") {
+    // Your hacking work will level faster
+    return "hacking";
+  }
+  
+  return focus;
 }

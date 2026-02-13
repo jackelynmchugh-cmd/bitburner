@@ -1,73 +1,84 @@
 /** @param {NS} ns **/
 import { updateRegistrySection } from "./registry.js";
-import { checkFactionRequirements } from "./faction-requirements.js";
 
-export async function main(ns) {
-  if (!ns.singularity) {
-    ns.print("Singularity not unlocked");
-    return;
-  }
+export async function main(ns){
+  if(!ns.singularity) return;
   
   ns.disableLog("ALL");
   
-  const mode = ns.args.includes("--install") ? "install" : 
-               ns.args.includes("--monitor") ? "monitor" : "purchase";
+  const installMode = ns.args.includes("--install");
+  const monitorMode = ns.args.includes("--monitor");
   
-  // Join any pending invitations (check requirements first)
-  if (ns.singularity.checkFactionInvitations) {
-    const invitations = ns.singularity.checkFactionInvitations();
-    for (const faction of invitations) {
-      const check = checkFactionRequirements(ns, faction);
-      if (check.met) {
-        ns.singularity.joinFaction(faction);
+  while(true) {
+    try {
+      const owned = ns.singularity.getOwnedAugmentations(true);
+      const ready = ns.singularity.getOwnedAugmentations(false)
+        .filter(a => !owned.includes(a));
+      
+      if(ready.length === 0) {
+        await ns.sleep(10000);
+        continue;
       }
+      
+      // Calculate total cost and priority
+      let totalCost = 0;
+      let priorityScore = 0;
+      
+      for(const aug of ready) {
+        try {
+          const cost = ns.singularity.getAugmentationPrice(aug);
+          totalCost += cost;
+          priorityScore += scoreAugmentation(aug);
+        } catch {}
+      }
+      
+      const money = ns.getServerMoneyAvailable("home");
+      const canAfford = money >= totalCost;
+      
+      // Only install if explicitly in install mode, have money, and good score
+      const shouldInstall = installMode && canAfford && priorityScore >= 10;
+      
+      updateRegistrySection(ns, "augments", {
+        ready: ready.length,
+        owned: owned.length,
+        totalCost,
+        canAfford,
+        money,
+        priorityScore
+      });
+      
+      if(shouldInstall) {
+        ns.print(`Installing ${ready.length} augmentations (score: ${priorityScore}, cost: $${totalCost.toLocaleString()})`);
+        ns.singularity.installAugmentations("master-brain.js");
+        return; // Script exits after install
+      }
+      
+      await ns.sleep(10000);
+    } catch(e) {
+      ns.print(`Error in augment-manager: ${e}`);
+      await ns.sleep(10000);
     }
   }
+}
 
-  const money = ns.getServerMoneyAvailable("home");
-  const ownedAugs = ns.singularity.getOwnedAugmentations(true);
+function scoreAugmentation(aug) {
+  const highPriority = [
+    "NeuroFlux Governor",
+    "The Red Pill",
+    "QLink",
+    "Argo Chitlin",
+    "BitRunner",
+    "Cranial Signal Processing"
+  ];
   
-  if (mode === "install") {
-    // ASCENSION mode: install and reset
-    const installable = ns.singularity.getOwnedAugmentations(false).filter(a => 
-      !ownedAugs.includes(a)
-    );
-    
-    if (installable.length >= 2) {
-      ns.singularity.installAugmentations("master-brain.js");
-      // Script will exit here, game will reset
-    }
-    return;
-  }
+  const mediumPriority = [
+    "Enhanced Hacking Ability",
+    "Hacking Speed-Up",
+    "Neuroreceptor Management Implant",
+    "Hypersensitive Pheromone Detection"
+  ];
   
-  if (mode === "monitor") {
-    // EXPANSION mode: passive monitor, only run if home >= 512GB
-    const home = ns.getServer("home");
-    if (home.maxRam < 512) {
-      return; // Not ready yet
-    }
-    
-    // Just check and purchase, don't loop
-    mode = "purchase";
-  }
-  
-  // Purchase mode: buy available augments
-  for (const faction of ns.getPlayer().factions || []) {
-    const augs = ns.singularity.getAugmentationsFromFaction(faction);
-    
-    for (const aug of augs) {
-      if (aug === "NeuroFlux Governor") continue; // Skip NeuroFlux
-      if (ownedAugs.includes(aug)) continue;
-      
-      const rep = ns.singularity.getFactionRep(faction);
-      const repReq = ns.singularity.getAugmentationRepReq(aug);
-      const cost = ns.singularity.getAugmentationPrice(aug);
-      
-      if (rep >= repReq && cost <= money) {
-        ns.singularity.purchaseAugmentation(faction, aug);
-      }
-    }
-  }
-  
-  // One-shot: exit after purchase attempt
+  if (highPriority.some(p => aug.includes(p))) return 5;
+  if (mediumPriority.some(p => aug.includes(p))) return 3;
+  return 1;
 }

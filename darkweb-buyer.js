@@ -11,7 +11,7 @@ export async function main(ns) {
   
   const money = ns.getServerMoneyAvailable("home");
   
-  // Buy TOR if needed (only if money >= 500k in BOOT phase)
+  // Buy TOR if needed
   if (!ns.getPlayer().tor) {
     if (money >= 500000 && ns.singularity.purchaseTor) {
       ns.singularity.purchaseTor();
@@ -20,10 +20,19 @@ export async function main(ns) {
     }
   }
 
+  // Programs in priority order: Formulas first, then exploits, then scanners
   const programs = [
-    "BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe",
-    "ServerProfiler.exe", "DeepscanV1.exe", "DeepscanV2.exe", "AutoLink.exe",
-    "Formulas.exe", "DarkscapeNavigator.exe"
+    "Formulas.exe",         // PRIORITY 1: Essential for accurate calculations
+    "BruteSSH.exe",         // PRIORITY 2: Exploits
+    "FTPCrack.exe",
+    "relaySMTP.exe",
+    "HTTPWorm.exe",
+    "SQLInject.exe",
+    "ServerProfiler.exe",   // PRIORITY 3: Scanners
+    "DeepscanV1.exe",
+    "DeepscanV2.exe",
+    "AutoLink.exe",         // PRIORITY 4: Utility
+    "DarkscapeNavigator.exe" // PRIORITY 5: Navigation
   ];
 
   let acted = false;
@@ -39,12 +48,22 @@ export async function main(ns) {
       if (ns.singularity.purchaseProgram(prog)) {
         owned.push(prog);
         acted = true;
+        // Buy one at a time, check money before next
+        break;
       }
     }
   }
   
   updateRegistrySection(ns, "darkweb", {
-    programsOwned: owned
+    programsOwned: owned,
+    formulas: ns.fileExists("Formulas.exe", "home"),
+    exploits: [
+      ns.fileExists("BruteSSH.exe", "home"),
+      ns.fileExists("FTPCrack.exe", "home"),
+      ns.fileExists("relaySMTP.exe", "home"),
+      ns.fileExists("HTTPWorm.exe", "home"),
+      ns.fileExists("SQLInject.exe", "home")
+    ].filter(x => x).length
   });
 
   // One-shot: exit after purchase attempt

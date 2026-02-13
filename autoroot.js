@@ -41,6 +41,20 @@ export async function main(ns) {
       if (changed) await ns.sleep(200);
     }
     
+    // Update root count after rooting phase too
+    if (changed || now - lastScan >= scanInterval) {
+      const allServers = scanAllServers(ns);
+      const rootedCount = allServers.filter(s => ns.hasRootAccess(s)).length;
+      
+      updateRegistrySection(ns, "infra", {
+        autoroot: {
+          lastScan: now,
+          rootedCount,
+          totalServers: allServers.length
+        }
+      });
+    }
+    
     await ns.sleep(5000); // Check every 5 seconds
   }
 }
@@ -66,7 +80,6 @@ function scanAllServers(ns) {
 }
 
 function tryRoot(ns, host) {
-  // Check if server exists and is hackable (APIs throw errors for non-hackable servers in 3.0.0)
   if (!ns.serverExists(host)) return false;
   
   try {
@@ -76,10 +89,10 @@ function tryRoot(ns, host) {
     const requiredHack = server.requiredHackingSkill;
     if (ns.getHackingLevel() < requiredHack) return false;
     
-    // Try each exploit - check return values instead of catching errors (3.0.0 change)
+    // Try each exploit
     if (!server.sshPortOpen && ns.fileExists("BruteSSH.exe", "home")) {
       const result = ns.brutessh(host);
-      if (!result) return false; // Failed to open port
+      if (!result) return false;
     }
     if (!server.ftpPortOpen && ns.fileExists("FTPCrack.exe", "home")) {
       const result = ns.ftpcrack(host);
@@ -98,11 +111,10 @@ function tryRoot(ns, host) {
       if (!result) return false;
     }
     
-    // Try to nuke - check return value instead of catching error (3.0.0 change)
+    // Try to nuke
     const nukeResult = ns.nuke(host);
     return nukeResult === true;
   } catch (e) {
-    // Server might not be hackable (APIs throw errors for non-hackable servers in 3.0.0)
     return false;
   }
 }
